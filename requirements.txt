@@ -1,2 +1,2 @@
-python-telegram-bot==21.6
+pyTelegramBotAPI==4.18.0
 anthropic==0.40.0
