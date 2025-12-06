@@ -92,10 +92,15 @@ def log_to_sheet(sheet_name, row_data):
         if not service:
             return False, "Google Sheets nicht verfügbar"
         
+        # Fix date format - if first column is a date, prefix with apostrophe to prevent serial number
+        if row_data and row_data[0] and isinstance(row_data[0], str) and '-' in row_data[0]:
+            # Keep date as-is, Google will handle it correctly with RAW
+            pass
+        
         service.spreadsheets().values().append(
             spreadsheetId=SHEET_ID,
             range=f'{sheet_name}!A:BZ',
-            valueInputOption='USER_ENTERED',
+            valueInputOption='RAW',  # Changed from USER_ENTERED to prevent date conversion
             insertDataOption='INSERT_ROWS',
             body={'values': [row_data]}
         ).execute()
@@ -116,7 +121,7 @@ def update_row_in_sheet(sheet_name, row_number, col_start, col_end, values):
         service.spreadsheets().values().update(
             spreadsheetId=SHEET_ID,
             range=range_str,
-            valueInputOption='USER_ENTERED',
+            valueInputOption='RAW',  # Changed from USER_ENTERED
             body={'values': [values]}
         ).execute()
         
@@ -310,6 +315,18 @@ def log_activity(steps, calories):
         row = [today] + [''] * 61 + values
         return log_to_sheet(SHEETS['health'], row)
 
+def log_fluid_cutoff(fluid_ok):
+    """Log fluid cutoff to HEALTH sheet column BN"""
+    today = datetime.now(TIMEZONE).strftime('%Y-%m-%d')
+    row_num = find_row_by_date(SHEETS['health'], today)
+    
+    if row_num:
+        return update_row_in_sheet(SHEETS['health'], row_num, 'BN', 'BN', [fluid_ok])
+    else:
+        # BN is column 66 (A=1, so 65 empty cols before BN)
+        row = [today] + [''] * 64 + [fluid_ok]
+        return log_to_sheet(SHEETS['health'], row)
+
 def log_exercise(data):
     """Log exercise to EXERCISE sheet"""
     today = datetime.now(TIMEZONE).strftime('%Y-%m-%d')
@@ -376,7 +393,9 @@ def log_mood(time_of_day, data):
     return log_to_sheet(SHEETS['mood'], row)
 
 def log_supplements(data):
-    """Log supplements to SUPPLEMENTS sheet"""
+    """Log supplements to SUPPLEMENTS sheet
+    Columns: Date, Blueprint_Stack, Omega3, ProButyrate, Collagen, NAC, Schlaf (Mag/Glyc), Notes
+    """
     today = datetime.now(TIMEZONE).strftime('%Y-%m-%d')
     
     row = [
@@ -386,6 +405,7 @@ def log_supplements(data):
         data.get('probutyrate', ''),
         data.get('collagen', ''),
         data.get('nac', ''),
+        data.get('schlaf', ''),  # G: Schlaf (Magnesium, Glycin)
         data.get('notes', '')
     ]
     
@@ -678,6 +698,17 @@ Die Screenshots zeigen typischerweise:
 8. SpO2 Details
 9. Respiratory Rate + Skin Temperature
 
+WICHTIG - Analysiere die Sleep Stages Grafik genau:
+- REM_Latency: Zeit vom Einschlafen bis zum ERSTEN lila REM-Balken (schau auf die Zeitachse unten)
+- Time_Falling_Asleep: Zeit vom Schlafbeginn (linker Rand) bis zum ersten farbigen Schlaf-Balken (nicht grau/Awake)
+- Time_Final_Wake: Schau auf den letzten grauen Balken am Ende - wie lange war das?
+
+Die grauen Balken = Awake Zeit. Die farbigen Balken:
+- Pink/Rosa = Awake
+- Lila = REM
+- Hellblau = Light Sleep
+- Dunkelblau = Deep Sleep
+
 Extrahiere und antworte NUR im JSON Format:
 {
     "sleep_score": "Zahl 0-100",
@@ -705,6 +736,9 @@ Extrahiere und antworte NUR im JSON Format:
     "hr_rem": "BPM",
     "hr_light": "BPM",
     "hr_deep": "BPM",
+    "rem_latency": "Minuten bis erster REM (schätze aus Grafik)",
+    "time_falling_asleep": "Minuten (vom Start bis erster Schlaf-Balken)",
+    "time_final_wake": "Minuten (letzter Awake-Abschnitt)",
     "sleep_stability": "Text",
     "bedtime": "HH:MM",
     "wake_time": "HH:MM"
@@ -812,7 +846,7 @@ def skip_to_next_evening_step(chat_id, current_step):
     bot.send_message(chat_id, "⏭️ Übersprungen!")
     
     steps = ["evening_steps", "evening_exercise", "evening_meals", "evening_learning",
-             "evening_habits", "evening_cravings", "evening_finance", "evening_mood"]
+             "evening_habits", "evening_gratitude", "evening_cravings", "evening_finance", "evening_mood"]
     
     try:
         idx = steps.index(current_step)
@@ -823,6 +857,7 @@ def skip_to_next_evening_step(chat_id, current_step):
                 "evening_meals": ask_evening_meals,
                 "evening_learning": ask_evening_learning,
                 "evening_habits": ask_evening_habits,
+                "evening_gratitude": ask_gratitude,
                 "evening_cravings": ask_evening_cravings,
                 "evening_finance": ask_evening_finance,
                 "evening_mood": ask_evening_mood
@@ -982,10 +1017,11 @@ def parse_sleep_environment(chat_id, text):
 def ask_cutoffs(chat_id):
     msg = """⏰ **Cutoffs gestern**
 
-Format: `thc, nikotin, koffein, essen, screens`
+Format: `thc nikotin koffein essen screens fluid`
 (ja oder Uhrzeit wenn überschritten)
+Fluid Cutoff = 20:30
 
-Beispiel: `ja, ja, ja, ja, ja` oder `23:00, ja, 15:00, 21:30, ja`
+Beispiel: `ja ja ja ja ja ja` oder `23:00 ja 15:00 21:30 ja nein`
 
 Oder `skip`"""
     bot.send_message(chat_id, msg, parse_mode='Markdown')
@@ -1017,7 +1053,18 @@ def parse_cutoffs(chat_id, text):
             'screens_ok': scr_ok, 'screens_time': scr_time
         }
         log_cutoffs(data)
+        
+        # Fluid cutoff (6th value) - logged separately to column BN
+        if len(parts) >= 6:
+            fluid_ok, _ = parse_cutoff(parts[5])
+            log_fluid_cutoff(fluid_ok)
+        
         violations = sum([1 for x in [thc_ok, nik_ok, koff_ok, ess_ok, scr_ok] if x == 'NO'])
+        if len(parts) >= 6:
+            fluid_ok, _ = parse_cutoff(parts[5])
+            if fluid_ok == 'NO':
+                violations += 1
+        
         if violations == 0:
             bot.send_message(chat_id, "✅ Alle Cutoffs eingehalten! 💪")
         else:
@@ -1049,10 +1096,12 @@ def parse_reading(chat_id, text):
 def ask_supplements(chat_id):
     msg = """💊 **Supplements**
 
-Format: `blueprint, omega3, nac, collagen`
-(jeweils ja/nein)
+Format: `blueprint omega3 probutyrate collagen nac schlaf`
+(jeweils ja/nein, mit Space getrennt)
 
-Beispiel: `ja, ja, ja, ja` oder `nein, ja, nein, ja`
+Schlaf = Magnesium + Glycin (gestern Abend)
+
+Beispiel: `ja ja ja ja ja ja` oder `nein ja nein ja ja nein`
 
 Oder `skip`"""
     bot.send_message(chat_id, msg, parse_mode='Markdown')
@@ -1062,20 +1111,32 @@ def parse_supplements(chat_id, text):
     parts = [p.strip().lower() for p in text.replace(',', ' ').split()]
     
     def yn(val):
-        return 'YES' if val in ['ja', 'yes', 'j', 'y'] else 'NO'
+        return 'YES' if val in ['ja', 'yes', 'j', 'y', '1'] else 'NO'
     
-    if len(parts) >= 4:
+    # Order: blueprint, omega3, probutyrate, collagen, nac, schlaf
+    if len(parts) >= 6:
         data = {
             'blueprint_stack': yn(parts[0]),
             'omega3': yn(parts[1]),
-            'nac': yn(parts[2]),
+            'probutyrate': yn(parts[2]),
             'collagen': yn(parts[3]),
-            'probutyrate': yn(parts[4]) if len(parts) > 4 else ''
+            'nac': yn(parts[4]),
+            'schlaf': yn(parts[5])
         }
-    elif len(parts) == 1 and parts[0] in ['ja', 'yes', 'j', 'y']:
-        data = {'blueprint_stack': 'YES', 'omega3': 'YES', 'nac': 'YES', 'collagen': 'YES', 'probutyrate': 'YES'}
+    elif len(parts) >= 5:
+        data = {
+            'blueprint_stack': yn(parts[0]),
+            'omega3': yn(parts[1]),
+            'probutyrate': yn(parts[2]),
+            'collagen': yn(parts[3]),
+            'nac': yn(parts[4]),
+            'schlaf': ''
+        }
+    elif len(parts) == 1 and parts[0] in ['ja', 'yes', 'j', 'y', 'all']:
+        data = {'blueprint_stack': 'YES', 'omega3': 'YES', 'probutyrate': 'YES', 'collagen': 'YES', 'nac': 'YES', 'schlaf': 'YES'}
     else:
-        data = {'blueprint_stack': 'NO', 'omega3': 'NO', 'nac': 'NO', 'collagen': 'NO'}
+        bot.send_message(chat_id, "⚠️ Format: `ja ja ja ja ja ja` (6 Werte). Nochmal?")
+        return
     
     log_supplements(data)
     bot.send_message(chat_id, "✅ Supplements geloggt!")
@@ -1195,6 +1256,8 @@ def process_evening_step(chat_id, step, message=None, image_data=None):
         parse_evening_learning(chat_id, message.text if message else "")
     elif step == "evening_habits":
         parse_evening_habits(chat_id, message.text if message else "")
+    elif step == "evening_gratitude":
+        parse_gratitude(chat_id, message.text if message else "")
     elif step == "evening_cravings":
         parse_evening_cravings(chat_id, message.text if message else "")
     elif step == "evening_finance":
@@ -1215,62 +1278,64 @@ def parse_evening_steps(chat_id, text):
 def ask_evening_exercise(chat_id):
     msg = """🏋️ **Training heute?**
 
-Formate (mit Komma trennbar für mehrere):
+Formate:
 - `gym 45 push 8` (min, type, rpe)
 - `cardio 30 run`
 - `sauna 80 3 7` (temp, runden, min/runde)
 - `walk 45`
 - `fussball 90`
 
-Beispiel mehrere: `gym 45 push 8, sauna 80 3 7`
+Nach jeder Eingabe: Nächstes oder `done`
 
 Oder `nein`/`skip`"""
     bot.send_message(chat_id, msg, parse_mode='Markdown')
     set_state(chat_id, "evening_exercise")
+    temp_data[chat_id]['exercises_logged'] = 0
 
 def parse_evening_exercise(chat_id, text):
     text = text.lower().strip()
-    if text in ['nein', 'no', 'n']:
+    
+    if text in ['nein', 'no', 'n', 'done', 'fertig']:
+        count = temp_data[chat_id].get('exercises_logged', 0)
+        if count > 0:
+            if 'sauna' in str(temp_data[chat_id].get('last_exercise', '')):
+                sauna_count = get_sauna_count_this_week()
+                bot.send_message(chat_id, f"✅ {count} Training(s) geloggt! 🧖 Sauna: {sauna_count}/4")
+            else:
+                bot.send_message(chat_id, f"✅ {count} Training(s) geloggt!")
         ask_evening_meals(chat_id)
         return
     
-    # Split by comma for multiple exercises
-    exercises = [e.strip() for e in text.split(',')]
+    parts = text.split()
+    if not parts:
+        bot.send_message(chat_id, "⚠️ Format nicht erkannt. Nochmal oder `done`?")
+        return
     
-    for exercise in exercises:
-        parts = exercise.split()
-        if not parts:
-            continue
-        
-        exercise_type = parts[0]
-        data = {'type': exercise_type.capitalize()}
-        
-        if exercise_type == 'gym' and len(parts) >= 4:
-            data['duration'] = parts[1]
-            data['workout_type'] = parts[2]
-            data['rpe'] = parts[3]
-        elif exercise_type == 'cardio' and len(parts) >= 3:
-            data['duration'] = parts[1]
-            data['workout_type'] = parts[2]
-        elif exercise_type == 'sauna' and len(parts) >= 4:
-            data['sauna_temp'] = parts[1]
-            data['sauna_rounds'] = parts[2]
-            data['sauna_time_per_round'] = parts[3]
-            data['duration'] = int(parts[2]) * int(parts[3])
-        elif exercise_type in ['walk', 'fussball', 'yoga', 'sport'] and len(parts) >= 2:
-            data['duration'] = parts[1]
-        else:
-            continue
-        
-        log_exercise(data)
+    exercise_type = parts[0]
+    data = {'type': exercise_type.capitalize()}
     
-    if 'sauna' in text:
-        count = get_sauna_count_this_week()
-        bot.send_message(chat_id, f"✅ Training geloggt! 🧖 Sauna: {count}/4")
+    if exercise_type == 'gym' and len(parts) >= 4:
+        data['duration'] = parts[1]
+        data['workout_type'] = parts[2]
+        data['rpe'] = parts[3]
+    elif exercise_type == 'cardio' and len(parts) >= 3:
+        data['duration'] = parts[1]
+        data['workout_type'] = parts[2]
+    elif exercise_type == 'sauna' and len(parts) >= 4:
+        data['sauna_temp'] = parts[1]
+        data['sauna_rounds'] = parts[2]
+        data['sauna_time_per_round'] = parts[3]
+        data['duration'] = int(parts[2]) * int(parts[3])
+    elif exercise_type in ['walk', 'fussball', 'yoga', 'sport', 'schwimmen'] and len(parts) >= 2:
+        data['duration'] = parts[1]
     else:
-        bot.send_message(chat_id, "✅ Training geloggt!")
+        bot.send_message(chat_id, "⚠️ Format nicht erkannt. Nochmal oder `done`?")
+        return
     
-    ask_evening_meals(chat_id)
+    log_exercise(data)
+    temp_data[chat_id]['exercises_logged'] = temp_data[chat_id].get('exercises_logged', 0) + 1
+    temp_data[chat_id]['last_exercise'] = exercise_type
+    bot.send_message(chat_id, f"✅ {exercise_type.capitalize()} geloggt! Noch eins oder `done`?")
 
 def ask_evening_meals(chat_id):
     msg = """🍽️ **Mahlzeiten heute?**
@@ -1367,47 +1432,45 @@ def parse_evening_learning(chat_id, text):
 def ask_evening_habits(chat_id):
     msg = """☀️ **Habits heute**
 
-Format: `sonnenlicht, blaulicht, meditation, atem, sozial, hydration`
+Format: `sonnenlicht blaulicht meditation atem sozial hydration`
+(Min/ja-nein/Min/Min/1-10/1-10)
 
-Beispiel: `15, ja, 10, 5, 7, 8`
-
-Danach optional Dankbarkeit als freier Text.
+Beispiel: `15 ja 10 5 7 8`
 
 Oder `skip`"""
     bot.send_message(chat_id, msg, parse_mode='Markdown')
     set_state(chat_id, "evening_habits")
 
 def parse_evening_habits(chat_id, text):
-    # First try to parse the structured part
-    # Look for numbers and ja/nein at the start
-    parts = text.split()
+    parts = text.replace(',', ' ').split()
     
-    # Find where the gratitude text starts (after 6 structured values)
-    structured_parts = []
-    gratitude_parts = []
-    
-    for i, part in enumerate(parts):
-        clean = part.replace(',', '').strip()
-        if i < 6:
-            structured_parts.append(clean)
-        else:
-            gratitude_parts.append(part.replace(',', ''))
-    
-    if len(structured_parts) >= 6:
+    if len(parts) >= 6:
         data = {
-            'sunlight_morning': structured_parts[0] if structured_parts[0].isdigit() else '0',
-            'blue_light_glasses': 'YES' if structured_parts[1].lower() in ['ja', 'yes', 'j', 'y'] else 'NO',
-            'meditation': structured_parts[2] if structured_parts[2].isdigit() else '0',
-            'breathwork': structured_parts[3] if structured_parts[3].isdigit() else '0',
-            'social_interaction': structured_parts[4] if structured_parts[4].isdigit() else '5',
-            'hydration': structured_parts[5] if structured_parts[5].isdigit() else '5',
-            'grateful_for': ' '.join(gratitude_parts) if gratitude_parts else ''
+            'sunlight_morning': parts[0] if parts[0].isdigit() else '0',
+            'blue_light_glasses': 'YES' if parts[1].lower() in ['ja', 'yes', 'j', 'y', '1'] else 'NO',
+            'meditation': parts[2] if parts[2].isdigit() else '0',
+            'breathwork': parts[3] if parts[3].isdigit() else '0',
+            'social_interaction': parts[4] if parts[4].isdigit() else '5',
+            'hydration': parts[5] if parts[5].isdigit() else '5',
+            'grateful_for': ''
         }
-        log_habits(data)
-        bot.send_message(chat_id, "✅ Habits geloggt!")
+        temp_data[chat_id]['habits_data'] = data
+        ask_gratitude(chat_id)
     else:
-        bot.send_message(chat_id, "⚠️ Format nicht erkannt, weiter...")
-    
+        bot.send_message(chat_id, "⚠️ Format: `15 ja 10 5 7 8` (6 Werte). Nochmal?")
+
+def ask_gratitude(chat_id):
+    msg = """🙏 **Wofür bist du heute dankbar?**
+
+Freier Text oder `skip`"""
+    bot.send_message(chat_id, msg, parse_mode='Markdown')
+    set_state(chat_id, "evening_gratitude")
+
+def parse_gratitude(chat_id, text):
+    data = temp_data[chat_id].get('habits_data', {})
+    data['grateful_for'] = text.strip()
+    log_habits(data)
+    bot.send_message(chat_id, "✅ Habits + Dankbarkeit geloggt!")
     ask_evening_cravings(chat_id)
 
 def ask_evening_cravings(chat_id):
@@ -1684,13 +1747,16 @@ def handle_quick_log(chat_id, text):
         bot.send_message(chat_id, f"✅ €{parts[1]} ({parts[2]})")
         return True
     
-    # Supps
+    # Supps - order: blueprint, omega3, probutyrate, collagen, nac, schlaf
     elif cmd == 'supps':
-        if len(parts) >= 5:
+        if len(parts) >= 7:
             def yn(v): return 'YES' if v in ['ja', 'yes', 'j', 'y'] else 'NO'
-            data = {'blueprint_stack': yn(parts[1]), 'omega3': yn(parts[2]), 'nac': yn(parts[3]), 'collagen': yn(parts[4])}
-        elif len(parts) == 2 and parts[1] in ['ja', 'yes']:
-            data = {'blueprint_stack': 'YES', 'omega3': 'YES', 'nac': 'YES', 'collagen': 'YES'}
+            data = {'blueprint_stack': yn(parts[1]), 'omega3': yn(parts[2]), 'probutyrate': yn(parts[3]), 'collagen': yn(parts[4]), 'nac': yn(parts[5]), 'schlaf': yn(parts[6])}
+        elif len(parts) >= 6:
+            def yn(v): return 'YES' if v in ['ja', 'yes', 'j', 'y'] else 'NO'
+            data = {'blueprint_stack': yn(parts[1]), 'omega3': yn(parts[2]), 'probutyrate': yn(parts[3]), 'collagen': yn(parts[4]), 'nac': yn(parts[5]), 'schlaf': ''}
+        elif len(parts) == 2 and parts[1] in ['ja', 'yes', 'all']:
+            data = {'blueprint_stack': 'YES', 'omega3': 'YES', 'probutyrate': 'YES', 'collagen': 'YES', 'nac': 'YES', 'schlaf': 'YES'}
         else:
             data = {'blueprint_stack': 'NO'}
         log_supplements(data)
@@ -1806,9 +1872,10 @@ learn neuro 45 8
 spent 15 food
 spent 50 shopping i
 
-supps ja ja ja ja
-grateful Sonne heute
+supps ja ja ja ja ja ja
+(blueprint omega3 probutyrate collagen nac schlaf)
 
+grateful Sonne heute
 habits 15 ja 10 5 7 8
 ```"""
     bot.reply_to(message, msg, parse_mode='Markdown')
