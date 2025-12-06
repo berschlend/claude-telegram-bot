@@ -173,14 +173,57 @@ def process_image_with_claude(image_data, prompt):
     except Exception as e:
         return f"Fehler: {str(e)}"
 
-def parse_ringconn_image(image_data):
-    """Extract Ringconn data from screenshot"""
-    prompt = """Analysiere diesen Ringconn Screenshot und extrahiere die Daten.
-    
-Antworte NUR in diesem Format (eine Zeile, komma-getrennt):
-sleep_score, sleep_hours, rhr, hrv, spo2, deep_sleep_min, rem_sleep_min, light_sleep_min, awake_min, steps, calories
+def parse_ringconn_screen1(image_data):
+    """Extract Sleep Score Factors: RHR, HRV, Time Asleep, Efficiency"""
+    prompt = """Analysiere diesen Ringconn Sleep Score Factors Screenshot.
 
-Beispiel: 87, 7.5, 52, 45, 96, 90, 120, 180, 30, 8500, 2400
+Extrahiere diese Werte:
+- Sleeping Heart Rate (bpm)
+- Sleeping HRV (ms)
+- Time Asleep (in Minuten umrechnen, z.B. 8hr3min = 483)
+- Sleep Efficiency (%)
+
+Antworte NUR in diesem Format (komma-getrennt):
+rhr, hrv, sleep_minutes, efficiency
+
+Beispiel: 44, 111, 483, 91
+
+Wenn ein Wert nicht sichtbar ist, schreibe 0."""
+    
+    return process_image_with_claude(image_data, prompt)
+
+def parse_ringconn_screen2(image_data):
+    """Extract Sleep Duration: Time Asleep, Time in Bed"""
+    prompt = """Analysiere diesen Ringconn Sleep Duration Screenshot.
+
+Extrahiere diese Werte:
+- Time Asleep (in Minuten, z.B. 8hr3min = 483)
+- Time in Bed (in Minuten, z.B. 8hr50min = 530)
+- Sleep Efficiency (%)
+
+Antworte NUR in diesem Format (komma-getrennt):
+sleep_minutes, bed_minutes, efficiency
+
+Beispiel: 483, 530, 91
+
+Wenn ein Wert nicht sichtbar ist, schreibe 0."""
+    
+    return process_image_with_claude(image_data, prompt)
+
+def parse_ringconn_screen3(image_data):
+    """Extract Sleep Stages: Awake, REM, Light, Deep in minutes"""
+    prompt = """Analysiere diesen Ringconn Sleep Stages Screenshot.
+
+Extrahiere diese Werte (alle in Minuten):
+- Awake (z.B. 22min = 22)
+- REM (z.B. 50min = 50)
+- Light Sleep (z.B. 5hr58min = 358)
+- Deep Sleep (z.B. 1hr15min = 75)
+
+Antworte NUR in diesem Format (komma-getrennt):
+awake, rem, light, deep
+
+Beispiel: 22, 50, 358, 75
 
 Wenn ein Wert nicht sichtbar ist, schreibe 0."""
     
@@ -286,14 +329,61 @@ def send_morning_check():
 
 ---
 
-📊 **Ringconn Daten?**
-→ Screenshot schicken ODER
-→ Werte: score hours rhr hrv spo2 deep rem light awake steps cal
-→ Beispiel: `87 7.5 52 45 96 90 120 180 30 8500 2400`
+📊 **Ringconn Step 1/3: Sleep Score Factors**
+→ Screenshot mit: RHR, HRV, Time Asleep, Sleep Efficiency
 → Oder: `skip`"""
     
-    user_state[CHAT_ID] = {"step": "morning_ringconn"}
+    user_state[CHAT_ID] = {"step": "ringconn_1", "ringconn_data": {}}
     bot.send_message(CHAT_ID, msg)
+
+def send_ringconn_2():
+    """Ask for sleep duration screen"""
+    msg = """📊 **Ringconn Step 2/3: Sleep Duration**
+→ Screenshot mit: Time Asleep, Time in Bed, Sleep Efficiency
+→ Oder: `skip`"""
+    
+    user_state[CHAT_ID]["step"] = "ringconn_2"
+    bot.send_message(CHAT_ID, msg)
+
+def send_ringconn_3():
+    """Ask for sleep stages screen"""
+    msg = """📊 **Ringconn Step 3/3: Sleep Stages**
+→ Screenshot mit: Awake, REM, Light Sleep, Deep Sleep (Minuten)
+→ Oder: `skip`"""
+    
+    user_state[CHAT_ID]["step"] = "ringconn_3"
+    bot.send_message(CHAT_ID, msg)
+
+def finalize_ringconn():
+    """Combine all ringconn data and log"""
+    data = user_state[CHAT_ID].get("ringconn_data", {})
+    
+    # Extract values with defaults
+    sleep_score = data.get("sleep_score", "")
+    sleep_hours = data.get("sleep_hours", "")
+    rhr = data.get("rhr", "")
+    hrv = data.get("hrv", "")
+    spo2 = data.get("spo2", "96")  # Default if not captured
+    deep = data.get("deep", "")
+    rem = data.get("rem", "")
+    light = data.get("light", "")
+    awake = data.get("awake", "")
+    steps = data.get("steps", "")
+    calories = data.get("calories", "")
+    efficiency = data.get("efficiency", "")
+    
+    if any([sleep_hours, hrv, deep]):  # At least some data
+        success, msg = log_health_ringconn(sleep_score, sleep_hours, rhr, hrv, spo2, deep, rem, light, awake, steps, calories, f"Efficiency: {efficiency}")
+        if success:
+            bot.send_message(CHAT_ID, f"""✅ Ringconn komplett geloggt!
+Sleep: {sleep_hours}h, HRV: {hrv}ms
+Deep: {deep}min, REM: {rem}min""")
+        else:
+            bot.send_message(CHAT_ID, f"❌ Fehler: {msg}")
+    else:
+        bot.send_message(CHAT_ID, "⏭️ Ringconn übersprungen")
+    
+    send_morning_sleep()
 
 def send_morning_sleep():
     """Ask for subjective sleep after Ringconn"""
@@ -358,8 +448,8 @@ def send_evening_learning():
 def send_evening_cravings():
     """Ask for cravings"""
     msg = """😤 **Cravings heute?**
-→ Format: `typ intensität`
-→ Beispiel: `thc 7` oder `sugar 4`
+→ Format: `typ intensität` (mehrere möglich)
+→ Beispiel: `thc 7` oder `thc 8 nikotin 5 sugar 3`
 → Oder: `nein`"""
     
     user_state[CHAT_ID] = {"step": "evening_cravings"}
@@ -388,7 +478,7 @@ Gute Nacht! 🌙"""
 
 # === MESSAGE HANDLERS ===
 
-@bot.message_handler(commands=['start'])
+@bot.message_handler(commands=['start', 'help'])
 def cmd_start(message):
     bot.reply_to(message, """👋 Zeroism Coach Bot!
 
@@ -397,13 +487,40 @@ def cmd_start(message):
 /today - Heutige Termine
 /morning - Morning Check starten
 /evening - Evening Review starten
-/log - Manuell loggen
+/quick - Quick-Log Formate
+/reset - State zurücksetzen
 
-**Quick-Log:**
-Einfach schreiben:
+**Quick-Log:** Einfach schreiben:
 • `sauna 20 gofit`
 • `meal oats milk honey`
 • `learn neuro 45`""")
+
+@bot.message_handler(commands=['quick', 'logs', 'formats'])
+def cmd_quick(message):
+    bot.reply_to(message, """📝 **Quick-Log Formate**
+
+**Exercise:**
+`sauna 20 gofit`
+`gym 45 gofit`
+`cardio 30`
+`run 25`
+
+**Meals:**
+`meal oats milk banana honey`
+
+**Learning:**
+`learn neuro 45`
+`learn stats 30 anki`
+
+**Cravings:**
+`craving thc 7`
+`craving sugar 5`
+
+**Finance:**
+`spent 15 food`
+`spent 30 transport`
+
+**Foto:** Einfach schicken → dann `meal` oder `ringconn` sagen""")
 
 @bot.message_handler(commands=['morning'])
 def cmd_morning(message):
@@ -412,6 +529,26 @@ def cmd_morning(message):
 @bot.message_handler(commands=['evening'])
 def cmd_evening(message):
     send_evening_check()
+
+@bot.message_handler(commands=['testproactive'])
+def cmd_test_proactive(message):
+    """Test that proactive messaging works"""
+    bot.reply_to(message, "🧪 Teste proaktive Nachricht in 10 Sekunden...")
+    import threading
+    def delayed_test():
+        import time
+        time.sleep(10)
+        bot.send_message(CHAT_ID, "✅ Proaktive Nachricht funktioniert! Du wirst um 07:00 und 22:30 automatisch Nachrichten bekommen.")
+    threading.Thread(target=delayed_test).start()
+
+@bot.message_handler(commands=['reset'])
+def cmd_reset(message):
+    """Reset conversation state"""
+    chat_id = message.chat.id
+    user_state[chat_id] = {"step": None}
+    if chat_id in conversations:
+        conversations[chat_id] = []
+    bot.reply_to(message, "🔄 State zurückgesetzt!")
 
 @bot.message_handler(commands=['status'])
 def cmd_status(message):
@@ -447,24 +584,64 @@ def handle_photo(message):
     file = requests.get(f'https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}')
     image_data = base64.b64encode(file.content).decode('utf-8')
     
-    if state == "morning_ringconn":
-        bot.reply_to(message, "🔄 Analysiere Ringconn Screenshot...")
-        result = parse_ringconn_image(image_data)
+    if state == "ringconn_1":
+        bot.reply_to(message, "🔄 Analysiere Sleep Score Factors...")
+        result = parse_ringconn_screen1(image_data)
         
         try:
             values = [x.strip() for x in result.split(',')]
-            if len(values) >= 11:
-                success, msg = log_health_ringconn(*values[:11])
-                if success:
-                    bot.reply_to(message, f"✅ Ringconn geloggt!\nScore: {values[0]}, Sleep: {values[1]}h, Steps: {values[9]}")
-                else:
-                    bot.reply_to(message, f"❌ Fehler: {msg}")
+            if len(values) >= 4:
+                rhr, hrv, sleep_min, efficiency = values[:4]
+                user_state[CHAT_ID]["ringconn_data"]["rhr"] = rhr
+                user_state[CHAT_ID]["ringconn_data"]["hrv"] = hrv
+                user_state[CHAT_ID]["ringconn_data"]["sleep_hours"] = str(round(int(sleep_min) / 60, 1)) if sleep_min.isdigit() else ""
+                user_state[CHAT_ID]["ringconn_data"]["efficiency"] = efficiency
+                bot.reply_to(message, f"✅ Step 1: RHR {rhr}bpm, HRV {hrv}ms")
             else:
-                bot.reply_to(message, f"⚠️ Konnte nicht alle Werte lesen:\n{result}")
-        except:
-            bot.reply_to(message, f"⚠️ Parsing-Fehler:\n{result}")
+                bot.reply_to(message, f"⚠️ Parsing: {result}")
+        except Exception as e:
+            bot.reply_to(message, f"⚠️ Fehler: {e}")
         
-        send_morning_sleep()
+        send_ringconn_2()
+    
+    elif state == "ringconn_2":
+        bot.reply_to(message, "🔄 Analysiere Sleep Duration...")
+        result = parse_ringconn_screen2(image_data)
+        
+        try:
+            values = [x.strip() for x in result.split(',')]
+            if len(values) >= 3:
+                sleep_min, bed_min, efficiency = values[:3]
+                if sleep_min.isdigit():
+                    user_state[CHAT_ID]["ringconn_data"]["sleep_hours"] = str(round(int(sleep_min) / 60, 1))
+                user_state[CHAT_ID]["ringconn_data"]["efficiency"] = efficiency
+                bot.reply_to(message, f"✅ Step 2: Sleep {sleep_min}min, Bed {bed_min}min")
+            else:
+                bot.reply_to(message, f"⚠️ Parsing: {result}")
+        except Exception as e:
+            bot.reply_to(message, f"⚠️ Fehler: {e}")
+        
+        send_ringconn_3()
+    
+    elif state == "ringconn_3":
+        bot.reply_to(message, "🔄 Analysiere Sleep Stages...")
+        result = parse_ringconn_screen3(image_data)
+        
+        try:
+            values = [x.strip() for x in result.split(',')]
+            if len(values) >= 4:
+                awake, rem, light, deep = values[:4]
+                user_state[CHAT_ID]["ringconn_data"]["awake"] = awake
+                user_state[CHAT_ID]["ringconn_data"]["rem"] = rem
+                user_state[CHAT_ID]["ringconn_data"]["light"] = light
+                user_state[CHAT_ID]["ringconn_data"]["deep"] = deep
+                bot.reply_to(message, f"✅ Step 3: Deep {deep}min, REM {rem}min, Light {light}min")
+            else:
+                bot.reply_to(message, f"⚠️ Parsing: {result}")
+        except Exception as e:
+            bot.reply_to(message, f"⚠️ Fehler: {e}")
+        
+        finalize_ringconn()
     
     elif state == "evening_meals":
         bot.reply_to(message, "🔄 Analysiere Mahlzeit...")
@@ -510,40 +687,43 @@ def handle_message(message):
                 user_state[chat_id] = {"step": None}
             elif text in ["ringconn", "ring", "sleep"]:
                 bot.reply_to(message, "🔄 Analysiere Ringconn Screenshot...")
-                result = parse_ringconn_image(stored_image)
+                result = parse_ringconn_screen1(stored_image)
                 try:
                     values = [x.strip() for x in result.split(',')]
-                    if len(values) >= 11:
-                        success, msg = log_health_ringconn(*values[:11])
+                    if len(values) >= 4:
+                        rhr, hrv, sleep_min, efficiency = values[:4]
+                        sleep_hours = str(round(int(sleep_min) / 60, 1)) if sleep_min.isdigit() else "0"
+                        success, msg = log_health_ringconn("", sleep_hours, rhr, hrv, "96", "", "", "", "", "", "", f"Efficiency: {efficiency}")
                         if success:
-                            bot.reply_to(message, f"✅ Ringconn geloggt!\nScore: {values[0]}, Sleep: {values[1]}h")
+                            bot.reply_to(message, f"✅ Ringconn geloggt!\nRHR: {rhr}bpm, HRV: {hrv}ms, Sleep: {sleep_hours}h")
                         else:
                             bot.reply_to(message, f"❌ Fehler: {msg}")
                     else:
                         bot.reply_to(message, f"⚠️ Konnte nicht alle Werte lesen:\n{result}")
-                except:
-                    bot.reply_to(message, f"⚠️ Parsing-Fehler:\n{result}")
+                except Exception as e:
+                    bot.reply_to(message, f"⚠️ Parsing-Fehler: {e}")
                 user_state[chat_id] = {"step": None}
             else:
                 bot.reply_to(message, "→ Sag `meal` oder `ringconn`")
         return
     
-    elif state == "morning_ringconn":
+    elif state == "ringconn_1":
         if text == "skip":
-            send_morning_sleep()
+            send_ringconn_2()
         else:
-            # Parse manual input: score hours rhr hrv spo2 deep rem light awake steps cal
-            values = text.split()
-            if len(values) >= 11:
-                success, msg = log_health_ringconn(*values[:11])
-                if success:
-                    bot.reply_to(message, f"✅ Ringconn geloggt!")
-                else:
-                    bot.reply_to(message, f"❌ {msg}")
-            else:
-                bot.reply_to(message, "⚠️ Brauche 11 Werte: score hours rhr hrv spo2 deep rem light awake steps cal")
-                return
-            send_morning_sleep()
+            bot.reply_to(message, "📸 Bitte Screenshot schicken oder `skip`")
+    
+    elif state == "ringconn_2":
+        if text == "skip":
+            send_ringconn_3()
+        else:
+            bot.reply_to(message, "📸 Bitte Screenshot schicken oder `skip`")
+    
+    elif state == "ringconn_3":
+        if text == "skip":
+            finalize_ringconn()
+        else:
+            bot.reply_to(message, "📸 Bitte Screenshot schicken oder `skip`")
     
     elif state == "morning_sleep":
         if text == "skip":
@@ -642,16 +822,29 @@ def handle_message(message):
             bot.reply_to(message, "✅ Clean day! 💪")
             send_evening_finance()
         else:
-            parts = text.split()
-            if len(parts) >= 2:
-                typ = parts[0]
-                intensity = parts[1]
-                
-                success, msg = log_craving(typ, intensity)
-                if success:
-                    bot.reply_to(message, f"✅ Craving geloggt: {typ} ({intensity}/10)")
-                else:
-                    bot.reply_to(message, f"❌ {msg}")
+            # Parse multiple cravings: typ1 intensity1 typ2 intensity2 OR typ1 intensity1, typ2 intensity2
+            parts = text.replace(',', ' ').split()
+            count = 0
+            logged = []
+            # Process pairs: typ intensity typ intensity
+            i = 0
+            while i < len(parts) - 1:
+                typ = parts[i]
+                # Check if next part is a number (intensity)
+                try:
+                    intensity = int(parts[i + 1])
+                    success, _ = log_craving(typ, str(intensity))
+                    if success:
+                        count += 1
+                        logged.append(f"{typ} ({intensity}/10)")
+                    i += 2
+                except ValueError:
+                    i += 1
+            
+            if count > 0:
+                bot.reply_to(message, f"✅ {count} Craving(s) geloggt: {', '.join(logged)}")
+            else:
+                bot.reply_to(message, "⚠️ Format: typ intensität typ intensität")
             send_evening_finance()
     
     elif state == "evening_finance":
